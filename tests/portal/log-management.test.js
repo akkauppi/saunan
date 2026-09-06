@@ -10,6 +10,7 @@ import {
   crc32,
   inspectContinuationCatalog,
   parseLogList,
+  parseFormatChallenge,
   parseLogStatus,
 } from "../../portal/js/log-management.js";
 import { ProtocolError } from "../../portal/js/protocol.js";
@@ -63,6 +64,9 @@ function statusLine(overrides = {}) {
     commissioning: 0,
     restart_required: 0,
     valid_slots: 2,
+    storage_state: "ready",
+    storage_init: "existing",
+    format_capability: 2,
     ...overrides,
   };
   return `LOG_STATUS ${Object.entries(fields)
@@ -230,6 +234,44 @@ test("status parser accepts the >512-byte management line and exposes retention 
     () => parseLogStatus(statusLine({ protocol: 2 })),
     /unsupported log protocol/,
   );
+});
+
+test("storage status and format challenge are parsed strictly", async () => {
+  const status = parseLogStatus(statusLine({ storage_state: "blank", fs: 0, total: 0, used: 0, free: 0, storage_init: "none" }));
+  assert.equal(status.storageState, "blank");
+  assert.equal(status.formatCapability, 2);
+  const challenge = parseFormatChallenge(
+    "LOG_FORMAT_CHALLENGE token=ABCDEF12 expires_ms=60000 fs=0 used=0",
+  );
+  assert.deepEqual(challenge, {
+    token: "ABCDEF12",
+    expiresMs: 60000,
+    filesystemReady: false,
+    usedBytes: 0,
+  });
+  assert.throws(
+    () => parseFormatChallenge("LOG_FORMAT_CHALLENGE token=bad expires_ms=1 fs=0 used=0"),
+    /token/,
+  );
+});
+
+test("format requires a device challenge and confirms the exact token", async () => {
+  const responses = new Map([
+    ["LOG STATUS", [framed(statusLine())]],
+    ["LOG FORMAT PREPARE", [framed("LOG_FORMAT_CHALLENGE token=ABCDEF12 expires_ms=60000 fs=1 used=32768")]],
+    ["LOG FORMAT CONFIRM token=ABCDEF12", [framed("LOG_FORMAT ok=1")]],
+  ]);
+  const { manager, port, transport } = await openManager(responses);
+  const challenge = await manager.prepareFormat();
+  assert.equal(challenge.token, "ABCDEF12");
+  await manager.confirmFormat(challenge.token);
+  assert.deepEqual(port.commands, [
+    "LOG STATUS",
+    "LOG FORMAT PREPARE",
+    "LOG STATUS",
+    "LOG FORMAT CONFIRM token=ABCDEF12",
+  ]);
+  await transport.close();
 });
 
 test("list parser preserves malformed relationship metadata for read-only recovery", () => {

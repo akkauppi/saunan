@@ -14,7 +14,8 @@ ESP32-C3 using PlatformIO with Arduino built as an ESP-IDF component.
   probes; otherwise the 12-hour cap or power loss ends the run.
 - Treat power removal at any instruction as normal. Never weaken CRC block
   validation, completed-block preservation, explicit interruption metadata, or
-  the rule that the filesystem is not formatted automatically.
+  the rule that only a completely erased session partition may be initialized
+  automatically; nonblank storage is never formatted automatically.
 - Wi-Fi stays disabled for the sauna logger until explicitly requested.
 - RTC slow-clock selection must come from ESP-IDF configuration, not an
   application compiler define. Keep the external 32.768 kHz crystal selected

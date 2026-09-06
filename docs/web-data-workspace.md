@@ -92,8 +92,9 @@ deletion. A confirmation names the entire chain, and segments are removed
 newest to oldest. The portal also blocks both paths during recording,
 unresolved commissioning/restart
 state, journaled automatic retention, an unsafe catalog, or a probable
-hot-start continuation. It does not offer format, bulk erase, or crash-dump
-erase.
+hot-start continuation. Storage formatting is a separate challenged action
+that requires an explicit erase phrase and final device confirmation; the
+portal never offers bulk whole-flash or crash-dump erase.
 
 Receipts exist only in the connected page. Quick-download override state is
 also temporary and is cleared on catalog refresh, disconnect, or reload. A

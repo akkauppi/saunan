@@ -346,6 +346,13 @@
             <div><dt>Retention</dt><dd id="records-retention">&mdash;</dd></div>
           </dl>
           <p class="retention-note" id="records-retention-note" hidden></p>
+          <details class="danger-zone" id="storage-danger-zone" hidden>
+            <summary>Storage recovery and erasure</summary>
+            <p id="storage-danger-description"></p>
+            <button class="button button--quiet" id="storage-format" type="button">
+              Initialize or erase session storage
+            </button>
+          </details>
           <div class="actions">
             <button class="button button--primary" id="records-connect" type="button">Choose logger</button>
             <button class="button button--secondary" id="records-refresh" type="button" hidden>Refresh records</button>
@@ -613,6 +620,29 @@
           <button class="button button--secondary" value="cancel">Keep on logger</button>
           <button class="button button--primary" id="confirm-remove-run" value="confirm">
             Remove run from logger
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="format-storage-dialog" aria-labelledby="format-storage-title">
+      <form method="dialog">
+        <p class="section-label">Irreversible storage action</p>
+        <h2 id="format-storage-title">Erase all session storage?</h2>
+        <p id="format-storage-description"></p>
+        <p id="format-storage-warning" class="message message--error">
+          This deletes every raw .slog session on the logger. Probe configuration
+          and crash-dump data are not changed.
+        </p>
+        <label for="format-storage-confirmation">
+          Type <code>ERASE SLOG STORAGE</code> to continue.
+          <input id="format-storage-confirmation" autocomplete="off" spellcheck="false">
+        </label>
+        <p id="format-storage-challenge" class="retention-note" hidden></p>
+        <div class="actions">
+          <button class="button button--secondary" value="cancel">Cancel</button>
+          <button class="button button--primary" id="confirm-format-storage" value="confirm" disabled>
+            Request erase challenge
           </button>
         </div>
       </form>

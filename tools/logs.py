@@ -78,6 +78,9 @@ class Session:
     continuation_delay_seconds: int = 0
     initial_rtc_source: str = "unknown"
     initial_rtc_hz: int = 0
+    start_hold_seconds: int = 30
+    final_relative_seconds: int | None = None
+    footer_record_count: int | None = None
 
 
 def parse_session(data: bytes) -> Session:
@@ -121,6 +124,8 @@ def parse_session(data: bytes) -> Session:
     warnings: list[str] = []
     finalized = False
     finish_reason = "interrupted"
+    final_relative_seconds = None
+    footer_record_count = None
     offset = header_size
     expected_sequence = 0
     record_struct = RECORD_V1 if version == 1 else RECORD_V2
@@ -133,6 +138,8 @@ def parse_session(data: bytes) -> Session:
                     warnings.append("invalid footer CRC; treating session as interrupted")
                 else:
                     finalized = True
+                    footer_record_count = footer[2]
+                    final_relative_seconds = footer[3]
                     finish_reason = FINISH_REASONS.get(footer[1], f"reason_{footer[1]}")
                     if footer[2] != len(samples):
                         warnings.append(
@@ -173,7 +180,7 @@ def parse_session(data: bytes) -> Session:
         session_id, sample_interval_ms, sensors, samples, finalized, finish_reason,
         warnings, continuation_of, version, boot_id, reset_reason,
         continuation_kind, continuation_delay_seconds, initial_rtc_source,
-        initial_rtc_hz
+        initial_rtc_hz, values[12], final_relative_seconds, footer_record_count
     )
 
 
@@ -350,11 +357,16 @@ def discover_run(input_path: Path, include_chain: bool = True) -> list[Session]:
     if not include_chain:
         return [selected]
     candidates: dict[int, Session] = {}
+    raw_by_id: dict[int, bytes] = {}
     for path in input_path.parent.glob("*.slog"):
         try:
-            session = parse_session(path.read_bytes())
+            raw = path.read_bytes()
+            session = parse_session(raw)
         except (OSError, ValueError):
             continue
+        if session.session_id in raw_by_id and raw_by_id[session.session_id] != raw:
+            raise ValueError(f"conflicting files share session ID {session.session_id}")
+        raw_by_id[session.session_id] = raw
         candidates.setdefault(session.session_id, session)
     candidates[selected.session_id] = selected
     root = selected
@@ -365,6 +377,9 @@ def discover_run(input_path: Path, include_chain: bool = True) -> list[Session]:
             raise ValueError("continuation chain contains a cycle")
         seen.add(root.session_id)
     ordered = [root]
+    # Ancestor traversal already visited the selected child. It must not exclude
+    # that child when walking forward from the root.
+    seen = {root.session_id}
     while True:
         successors = sorted(
             (session for session in candidates.values()
@@ -377,6 +392,8 @@ def discover_run(input_path: Path, include_chain: bool = True) -> list[Session]:
             raise ValueError(f"session {ordered[-1].session_id} has multiple continuation branches")
         ordered.append(successors[0])
         seen.add(successors[0].session_id)
+    if selected.session_id not in seen:
+        raise ValueError("selected session is absent from its continuation chain")
     return ordered
 
 
@@ -438,7 +455,16 @@ def main() -> int:
     try:
         if args.command == "status": lines = device.command("LOG STATUS", "LOG_STATUS")
         elif args.command == "list": lines = device.command("LOG LIST", "LOG_LIST_END")
-        elif args.command == "format": lines = device.command("LOG FORMAT YES", "LOG_FORMAT")
+        elif args.command == "format":
+            challenge = device.command("LOG FORMAT PREPARE", "LOG_FORMAT_CHALLENGE")
+            if not challenge:
+                raise RuntimeError("logger did not return a format challenge")
+            match = re.search(r"\btoken=([0-9A-Fa-f]{8})\b", challenge[-1])
+            if not match:
+                raise RuntimeError(f"invalid format challenge: {challenge[-1]}")
+            lines = challenge + device.command(
+                f"LOG FORMAT CONFIRM token={match.group(1)}", "LOG_FORMAT"
+            )
         elif args.command == "delete": lines = device.command(f"LOG DELETE {args.session_id}", "LOG_DELETE")
         elif args.command == "crash-erase": lines = device.command("LOG CRASH ERASE YES", "LOG_CRASH_ERASE")
         elif args.command == "crash-download":

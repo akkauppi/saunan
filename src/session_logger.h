@@ -70,6 +70,13 @@ class SessionLogger {
   static constexpr uint32_t kEndHoldMs = 30UL * 60UL * 1000UL;
   static constexpr uint32_t kMaxSessionMs = 12UL * 60UL * 60UL * 1000UL;
   static constexpr uint32_t kFilesystemRetryMs = 60UL * 1000UL;
+  static constexpr uint32_t kFormatChallengeLifetimeMs = 60UL * 1000UL;
+
+  enum class StorageState : uint8_t {
+    Ready = 0,
+    Blank = 1,
+    Unavailable = 2,
+  };
 
   enum class RetentionRefusal : uint8_t {
     None = 0,
@@ -101,6 +108,8 @@ class SessionLogger {
   bool startCandidate_ = false;
   bool coolingCandidate_ = false;
   bool filesystemReady_ = false;
+  StorageState storageState_ = StorageState::Unavailable;
+  uint8_t storageInitialization_ = 0;
   bool active_ = false;
   bool hotContinuationEligible_ = true;
   bool interruptedSessionWasHot_ = false;
@@ -127,6 +136,8 @@ class SessionLogger {
   bool commissioningMode_ = false;
   bool probeConfigRestartRequired_ = false;
   bool serialLineOverflow_ = false;
+  uint32_t formatChallenge_ = 0;
+  uint32_t formatChallengeExpiresAt_ = 0;
   RetentionRefusal retentionRefusal_ = RetentionRefusal::None;
   ContinuationKind continuationKind_ = ContinuationKind::None;
   SensorReading latestReading_{};
@@ -143,6 +154,8 @@ class SessionLogger {
   bool appendBlock(const SensorReading* readings, uint16_t count);
   bool appendFooter(const void* footer, size_t size);
   bool mountFilesystem();
+  bool partitionIsErased();
+  bool formatFilesystem();
   void retryFilesystem(uint32_t now);
   void findInterruptedSession();
   bool sessionEndsHot(File& file);
@@ -177,6 +190,8 @@ class SessionLogger {
   void resetIdleSamplingState();
   bool sessionLayoutMatches(const uint8_t* headerBytes, uint16_t version) const;
   bool processCommand(const String& command);
+  void printFormatChallenge();
+  bool confirmFormat(const String& command);
 };
 
 uint32_t crc32(const uint8_t* data, size_t length, uint32_t initial = 0);
