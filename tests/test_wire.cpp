@@ -437,6 +437,14 @@ void testTemperatureAndSessionEdges() {
 }  // namespace
 
 int main() {
+  {
+    auto sample = sampleForCount(8, 0xff);
+    sample.statusFlags |= sauna_wire::kSyntheticSample;
+    const auto bytes = encode(sample);
+    const auto decoded = sauna_wire::decodeDatagram(bytes.data(), bytes.size());
+    assert(decoded.sampleValid());
+    assert(decoded.sample.statusFlags & sauna_wire::kSyntheticSample);
+  }
   testKnownCrc();
   testLiteralGoldenVectors();
   testRoundTripAndEndianLayout();

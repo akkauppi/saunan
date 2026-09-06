@@ -24,12 +24,14 @@ enum StatusFlag : uint16_t {
   kMappingReady = 1U << 5,
   kStorageReady = 1U << 6,
   kSessionActive = 1U << 7,
+  kSyntheticSample = 1U << 8,  // Explicit bench data; never a stored measurement.
 };
 
 constexpr uint16_t kKnownStatusFlags =
     kChipTemperatureValid | kRtcExternalCrystalActive |
     kRtcCrystalFallbackObserved | kSensorSetDegraded |
-    kBootCounterValid | kMappingReady | kStorageReady | kSessionActive;
+    kBootCounterValid | kMappingReady | kStorageReady | kSessionActive |
+    kSyntheticSample;
 
 struct Envelope {
   uint8_t schemaMajor = 0;
