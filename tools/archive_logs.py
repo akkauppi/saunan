@@ -40,6 +40,10 @@ def inspection(raw: bytes) -> dict:
     return {
         "state": "finalized" if session.finalized and not session.warnings else "recoverable",
         "format_version": session.version,
+        "source_id": session.source_id,
+        "boot_nonce": session.boot_nonce,
+        "producer_commit": session.producer_commit,
+        "producer_version": session.producer_version,
         "session_id": session.session_id,
         "boot_id": session.boot_id or None,
         "continuation_of": session.continuation_of or None,

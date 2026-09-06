@@ -317,7 +317,7 @@ test("list parser preserves malformed relationship metadata for read-only recove
       continuation_of: 2,
       continuation_kind: 9,
       reason: 0,
-      version: 3,
+      version: 4,
     }),
     sessionLine(2, { state: "interrupted", reason: 2 }),
     "LOG_LIST_END",
@@ -424,7 +424,7 @@ test("download fails closed on active logging, wrong size, CRC, ids, and malform
       "LOG_DATA_END id=1",
     ], /malformed hexadecimal/],
     ["bound", [
-      "LOG_DATA_BEGIN id=1 bytes=131073 crc32=B63CFBCD",
+      "LOG_DATA_BEGIN id=1 bytes=262145 crc32=B63CFBCD",
     ], /outside the allowed bound/],
   ];
   for (const [name, lines, expected] of cases) {

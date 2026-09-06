@@ -78,3 +78,9 @@ Keep original archives immutable by convention. For revised notes, create a new
 archive from the same raw files and retain the previous one. Future `.slog`
 versions can use this archive without changing their raw bytes or this envelope;
 older inspection tools may label them unreadable while still preserving them.
+
+V3 integration update: the same archive also preserves and inspects V3. New
+recording payload uses about 177 KB per 12 hours before block/pretrigger and
+filesystem overhead; firmware start reserve is now 256 KiB. Partitions and the
+accepted ten-minute loss window remain unchanged. See
+[the V3 identity contract](sample-identity-and-radio.md).

@@ -4,6 +4,7 @@
 #include <FS.h>
 
 #include "probe_config.h"
+#include "sample_identity.h"
 #include "retention_policy.h"
 
 namespace sauna {
@@ -15,6 +16,7 @@ constexpr uint16_t kPretriggerRecords = 60;
 
 struct SensorReading {
   uint32_t capturedAtMs;
+  sauna_link::AcquisitionIdentity identity;
   int16_t centiC[kSensorCount];
   uint8_t validMask;
   int16_t chipCentiC;
@@ -50,7 +52,11 @@ class SessionLogger {
   using ExtraCommandHandler = bool (*)(const String& command);
 
   bool begin();
-  void addSample(const SensorReading& reading);
+  bool addSample(const SensorReading& reading);
+  void setBootIdentity(uint64_t source, uint64_t nonce) { sourceId_ = source; bootNonce_ = nonce; }
+  uint32_t bootId() const { return bootId_; }
+  bool bootCounterValid() const { return bootCounterValid_; }
+  uint32_t sessionId() const { return active_ ? currentSessionId_ : 0; }
   void handleSerial(ExtraCommandHandler extraHandler = nullptr);
   bool setProbeConfiguration(const ProbeMapping* mapping);
   void setProbeConfigStatus(ProbeConfigState state, uint32_t generation,
@@ -61,7 +67,7 @@ class SessionLogger {
   bool active() const { return active_; }
 
  private:
-  static constexpr uint32_t kSessionReserveBytes = 128 * 1024;
+  static constexpr uint32_t kSessionReserveBytes = 256 * 1024;
   static constexpr uint32_t kBlockWriteReserveBytes = 8 * 1024;
   static constexpr int16_t kStartCentiC = 4000;
   static constexpr int16_t kEndCentiC = 4500;
@@ -100,6 +106,8 @@ class SessionLogger {
   uint32_t continuationOf_ = 0;
   uint32_t interruptedSessionId_ = 0;
   uint32_t bootId_ = 0;
+  bool bootCounterValid_ = false;
+  uint64_t sourceId_ = 0, bootNonce_ = 0;
   uint32_t triggerAtMs_ = 0;
   uint32_t aboveStartSinceMs_ = 0;
   uint32_t continuationAnchorAtMs_ = 0;

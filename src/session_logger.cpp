@@ -1,6 +1,8 @@
 #include "session_logger.h"
 
 #include "session_store.h"
+#include "slog_v3.h"
+#include "radio_config.h"
 
 #include <LittleFS.h>
 #include <Preferences.h>
@@ -119,6 +121,7 @@ struct __attribute__((packed)) RetentionPendingV1 {
   uint32_t crc;
 };
 
+static_assert(sizeof(SAUNA_FIRMWARE_VERSION) <= 16, "V3 firmware version must fit 15 ASCII characters");
 static_assert(sizeof(SessionHeaderV1) == 130, "v1 log header layout changed");
 static_assert(sizeof(SessionHeaderV2) == 142, "v2 log header layout changed");
 static_assert(sizeof(StoredRecordV1) == 21, "v1 record layout changed");
@@ -143,9 +146,9 @@ constexpr size_t kMaximumEncodedBlocks =
     1 + (kMaximumPostTriggerRecords + kRecordsPerBlock - 1) /
             kRecordsPerBlock;
 constexpr size_t kMaximumEncodedSessionBytes =
-    sizeof(SessionHeaderV2) +
+    sauna_link::kSlogV3HeaderBytes +
     kMaximumEncodedBlocks * sizeof(BlockHeader) +
-    kMaximumEncodedRecords * sizeof(StoredRecordV2) + sizeof(SessionFooter);
+    kMaximumEncodedRecords * sauna_link::kSlogV3RecordBytes + sizeof(SessionFooter);
 constexpr size_t kFilesystemReserveMarginBytes = 4 * 4096;
 
 // New files are published only after both header and pretrigger are durable.
@@ -156,28 +159,6 @@ String storePath(uint32_t id, bool staging = false) {
   return String(path);
 }
 
-bool encodeBlock(const SensorReading* readings, uint16_t count,
-                 uint32_t triggerAtMs, uint32_t sequence,
-                 BlockHeader* block, StoredRecordV2* records) {
-  if (!readings || !count || count > kRecordsPerBlock) return false;
-  for (uint16_t index = 0; index < count; ++index) {
-    records[index].relativeSeconds =
-        static_cast<int32_t>(readings[index].capturedAtMs - triggerAtMs) / 1000;
-    memcpy(records[index].centiC, readings[index].centiC,
-           sizeof(records[index].centiC));
-    records[index].validMask = readings[index].validMask;
-    records[index].chipCentiC = readings[index].chipCentiC;
-    records[index].statusFlags = readings[index].statusFlags;
-  }
-  *block = {};
-  block->magic = kBlockMagic;
-  block->sequence = sequence;
-  block->recordCount = count;
-  block->payloadBytes = count * sizeof(StoredRecordV2);
-  block->payloadCrc = crc32(reinterpret_cast<const uint8_t*>(records),
-                            block->payloadBytes);
-  return true;
-}
 
 uint8_t bitCount(uint8_t value) {
   uint8_t count = 0;
@@ -296,8 +277,13 @@ bool SessionLogger::begin() {
   resetReason_ = static_cast<uint8_t>(esp_reset_reason());
   Preferences preferences;
   if (preferences.begin("sauna", false)) {
-    bootId_ = preferences.getUInt("boot_id", 0) + 1;
-    preferences.putUInt("boot_id", bootId_);
+    const uint32_t previous = preferences.getUInt("boot_id", 0);
+    if (previous != UINT32_MAX) {
+      bootId_ = previous + 1;
+      bootCounterValid_ = preferences.putUInt("boot_id", bootId_) == sizeof(uint32_t) &&
+          preferences.getUInt("boot_id", 0) == bootId_;
+    }
+    if (!bootCounterValid_) bootId_ = 0;
     preferences.end();
   }
   loadRetentionState();
@@ -421,22 +407,23 @@ void SessionLogger::pushRing(const SensorReading& reading) {
   if (ringCount_ < kPretriggerRecords) ++ringCount_;
 }
 
-void SessionLogger::addSample(const SensorReading& reading) {
+bool SessionLogger::addSample(const SensorReading& reading) {
   latestReading_ = reading;
   haveLatestReading_ = true;
   if (!filesystemReady_) {
     retryFilesystem(reading.capturedAtMs);
   }
-  if (!probeMappingReady_ || commissioningMode_) return;
+  if (!probeMappingReady_ || commissioningMode_) return false;
   // Keep the idle pre-trigger window in RAM through a transient mount outage.
   // An active session cannot coexist with an unavailable filesystem.
   pushRing(reading);
-  if (!filesystemReady_) return;
+  if (!filesystemReady_) return true;
   if (active_) {
     evaluateActive(reading);
   } else {
     evaluateIdle(reading);
   }
+  return true;
 }
 
 void SessionLogger::evaluateIdle(const SensorReading& reading) {
@@ -515,8 +502,8 @@ bool SessionLogger::startSession(const SensorReading& trigger) {
 
   SessionHeaderV2 header{};
   memcpy(header.magic, kHeaderMagic, sizeof(kHeaderMagic));
-  header.version = 2;
-  header.headerSize = sizeof(header);
+  header.version = 3;
+  header.headerSize = sauna_link::kSlogV3HeaderBytes;
   header.sessionId = nextId;
   header.sampleIntervalMs = kSampleIntervalMs;
   header.pretriggerMs = kPretriggerRecords * kSampleIntervalMs;
@@ -552,22 +539,18 @@ bool SessionLogger::startSession(const SensorReading& trigger) {
     header.sensors[index].relativeHeightCm =
         probeRelativeHeightCm(probeMapping_.geometryId, index);
   }
-  header.headerCrc = crc32(reinterpret_cast<const uint8_t*>(&header),
-                           sizeof(header) - sizeof(header.headerCrc));
   // Do not mutate active/durable cursors until the complete initial file has
   // been synchronized, closed, and atomically published.
-  SensorReading ordered[kPretriggerRecords];
   const uint16_t oldest = (ringHead_ + kPretriggerRecords - ringCount_) %
                           kPretriggerRecords;
-  for (uint16_t index = 0; index < ringCount_; ++index) {
-    ordered[index] = ring_[(oldest + index) % kPretriggerRecords];
-  }
-  StoredRecordV2 records[kRecordsPerBlock];
+  uint8_t records[kRecordsPerBlock * sauna_link::kSlogV3RecordBytes]{};
   BlockHeader block{};
-  if (!encodeBlock(ordered, ringCount_, trigger.capturedAtMs, 0, &block, records))
+  if (!sauna_link::encodeSlogBlock(ring_, ringCount_, trigger.capturedAtMs, 0, &block, records, oldest, kPretriggerRecords))
     return false;
+  uint8_t headerBytes[sauna_link::kSlogV3HeaderBytes]{};
+  sauna_link::encodeSlogHeader(header, sourceId_, bootNonce_, probeMapping_.generation, bootCounterValid_, headerBytes, SAUNA_SOURCE_COMMIT, SAUNA_FIRMWARE_VERSION);
   const StoreChunk chunks[] = {
-      {&header, sizeof(header)}, {&block, sizeof(block)},
+      {headerBytes, sizeof(headerBytes)}, {&block, sizeof(block)},
       {records, block.payloadBytes},
   };
   const StoreError created = createSession(
@@ -649,9 +632,9 @@ void SessionLogger::evaluateActive(const SensorReading& reading) {
 
 bool SessionLogger::appendBlock(const SensorReading* readings, uint16_t count) {
   if (!count) return true;
-  StoredRecordV2 records[kRecordsPerBlock];
+  uint8_t records[kRecordsPerBlock * sauna_link::kSlogV3RecordBytes]{};
   BlockHeader block{};
-  if (!encodeBlock(readings, count, triggerAtMs_, blockSequence_, &block, records))
+  if (!sauna_link::encodeSlogBlock(readings, count, triggerAtMs_, blockSequence_, &block, records))
     return false;
   const StoreChunk chunks[] = {
       {&block, sizeof(block)}, {records, block.payloadBytes},
@@ -681,7 +664,14 @@ bool SessionLogger::commitPending() {
 }
 
 bool SessionLogger::appendFooter(const void* footer, size_t size) {
-  const StoreChunk chunk{footer, size};
+  if (size != sizeof(SessionFooter)) return false;
+  const auto& fields = *static_cast<const SessionFooter*>(footer);
+  uint8_t encoded[20]{};
+  sauna_link::putLe(encoded, fields.magic, 4); encoded[4]=fields.reason;
+  sauna_link::putLe(encoded+8, fields.totalRecords, 4);
+  sauna_link::putLe(encoded+12, fields.finalRelativeSeconds, 4);
+  sauna_link::putLe(encoded+16, crc32(encoded,16), 4);
+  const StoreChunk chunk{encoded, sizeof(encoded)};
   const StoreError result = appendSession(sessionStoreFiles(),
       storePath(currentSessionId_).c_str(), &chunk, 1);
   if (result != StoreError::None) {
@@ -837,10 +827,11 @@ bool SessionLogger::readSessionLink(File& file, uint32_t filenameId,
 
   uint32_t sessionId = 0;
   uint32_t linkedId = 0;
-  uint8_t headerBytes[sizeof(SessionHeaderV2)]{};
+  uint8_t headerBytes[sauna_link::kSlogV3HeaderBytes]{};
   const size_t expectedSize =
       prefix.version == 1 ? sizeof(SessionHeaderV1)
-                          : prefix.version == 2 ? sizeof(SessionHeaderV2) : 0;
+                          : prefix.version == 2 ? sizeof(SessionHeaderV2)
+                          : prefix.version == 3 ? sauna_link::kSlogV3HeaderBytes : 0;
   if (!expectedSize || prefix.headerSize != expectedSize) return false;
   file.seek(0);
   if (file.read(headerBytes, expectedSize) != expectedSize) return false;
@@ -850,6 +841,14 @@ bool SessionLogger::readSessionLink(File& file, uint32_t filenameId,
   if (storedCrc != crc32(headerBytes, expectedSize - sizeof(storedCrc)))
     return false;
 
+  if (prefix.version == 3) {
+    using sauna_link::getLe;
+    if (!getLe(headerBytes+138,8) || !getLe(headerBytes+146,8) ||
+        !getLe(headerBytes+154,4) || getLe(headerBytes+158,2)!=1 ||
+        headerBytes[160]!=255 || headerBytes[26]!=8 || headerBytes[27] ||
+        getLe(headerBytes+198,2) || (headerBytes[161]&~7) ||
+        bool(headerBytes[161]&1)!=bool(getLe(headerBytes+46,4))) return false;
+  }
   if (prefix.version == 1) {
     SessionHeaderV1 header{};
     memcpy(&header, headerBytes, sizeof(header));
@@ -877,9 +876,9 @@ bool SessionLogger::readRetentionSegment(File& file, uint32_t filenameId,
 
   FinishReason reason{};
   const size_t headerSize =
-      version == 1 ? sizeof(SessionHeaderV1) : sizeof(SessionHeaderV2);
+      version == 1 ? sizeof(SessionHeaderV1) : version == 2 ? sizeof(SessionHeaderV2) : sauna_link::kSlogV3HeaderBytes;
   const size_t recordSize =
-      version == 1 ? sizeof(StoredRecordV1) : sizeof(StoredRecordV2);
+      version == 1 ? sizeof(StoredRecordV1) : version == 2 ? sizeof(StoredRecordV2) : sauna_link::kSlogV3RecordBytes;
   const bool finalized = sessionFinalized(file, &reason);
   RetentionFinishReason retentionReason = RetentionFinishReason::Interrupted;
   if (finalized) {
@@ -935,7 +934,8 @@ bool SessionLogger::finalizedSessionContentsValid(File& file, size_t headerSize,
         file.position() + block.payloadBytes > footerOffset) {
       return false;
     }
-    uint32_t checksum = 0;
+    uint32_t checksum = recordSize == sauna_link::kSlogV3RecordBytes ?
+        crc32(reinterpret_cast<const uint8_t*>(&block),12) : 0;
     size_t remaining = block.payloadBytes;
     while (remaining) {
       const size_t count = min(sizeof(buffer), remaining);
@@ -1282,7 +1282,7 @@ bool SessionLogger::sessionLayoutMatches(const uint8_t* headerBytes,
     spacingCm = header.spacingCm;
     sensorCount = header.sensorCount;
     memcpy(descriptors, header.sensors, sizeof(descriptors));
-  } else if (version == 2) {
+  } else if (version == 2 || version == 3) {
     SessionHeaderV2 header{};
     memcpy(&header, headerBytes, sizeof(header));
     spacingCm = header.spacingCm;
@@ -1313,12 +1313,12 @@ bool SessionLogger::sessionEndsHot(File& file) {
   if (file.read(reinterpret_cast<uint8_t*>(&prefix), sizeof(prefix)) !=
           sizeof(prefix) ||
       memcmp(prefix.magic, kHeaderMagic, sizeof(kHeaderMagic)) != 0 ||
-      (prefix.version != 1 && prefix.version != 2) ||
-      prefix.headerSize > sizeof(SessionHeaderV2) ||
+      (prefix.version != 1 && prefix.version != 2 && prefix.version != 3) ||
+      prefix.headerSize > sauna_link::kSlogV3HeaderBytes ||
       prefix.headerSize < sizeof(prefix) + sizeof(uint32_t)) {
     return false;
   }
-  uint8_t headerBytes[sizeof(SessionHeaderV2)]{};
+  uint8_t headerBytes[sauna_link::kSlogV3HeaderBytes]{};
   file.seek(0);
   if (file.read(headerBytes, prefix.headerSize) != prefix.headerSize) return false;
   uint32_t storedHeaderCrc = 0;
@@ -1329,9 +1329,10 @@ bool SessionLogger::sessionEndsHot(File& file) {
     return false;
   }
   if (!sessionLayoutMatches(headerBytes, prefix.version)) return false;
+  if (prefix.version == 3 && sauna_link::getLe(headerBytes+138,8)!=sourceId_) return false;
 
   const size_t recordSize = prefix.version == 1 ? sizeof(StoredRecordV1)
-                                                 : sizeof(StoredRecordV2);
+                                                 : prefix.version == 2 ? sizeof(StoredRecordV2) : sauna_link::kSlogV3RecordBytes;
   int16_t lastHottest = INT16_MIN;
   file.seek(prefix.headerSize);
   while (file.position() + sizeof(BlockHeader) <= file.size()) {
@@ -1350,9 +1351,9 @@ bool SessionLogger::sessionEndsHot(File& file) {
         file.position() + block.payloadBytes > file.size()) {
       break;
     }
-    uint8_t payload[kRecordsPerBlock * sizeof(StoredRecordV2)]{};
+    uint8_t payload[kRecordsPerBlock * sauna_link::kSlogV3RecordBytes]{};
     if (file.read(payload, block.payloadBytes) != block.payloadBytes ||
-        crc32(payload, block.payloadBytes) != block.payloadCrc) {
+        (prefix.version == 3 ? sauna_link::slogBlockCrc(reinterpret_cast<const uint8_t*>(&block),payload,block.payloadBytes) : crc32(payload, block.payloadBytes)) != block.payloadCrc) {
       break;
     }
     for (uint16_t index = 0; index < block.recordCount; ++index) {
@@ -1587,7 +1588,7 @@ void SessionLogger::listSessions() {
     const size_t read = entry.read(reinterpret_cast<uint8_t*>(&header), sizeof(header));
     if (read >= 12 && memcmp(header.magic, kHeaderMagic, sizeof(kHeaderMagic)) == 0) {
       version = header.version;
-      if (version == 2 && read == sizeof(header)) {
+      if ((version == 2 || version == 3) && read == sizeof(header)) {
         continuationOf = header.continuationOf;
         bootId = header.bootId;
         resetReason = header.resetReason;

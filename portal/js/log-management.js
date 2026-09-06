@@ -5,10 +5,10 @@ import {
   ProtocolTimeoutError,
 } from "./serial-transport.js";
 
-// A firmware segment is bounded to ~111 KiB. Keep the browser bound aligned
-// with the 128 KiB parser envelope so every accepted transfer can finish well
+// A firmware segment is bounded to ~177 KiB. Keep the browser bound aligned
+// with the 256 KiB parser envelope so every accepted transfer can finish well
 // inside the overall 115200-baud timeout.
-export const DEFAULT_MAX_LOG_BYTES = 128 * 1024;
+export const DEFAULT_MAX_LOG_BYTES = 256 * 1024;
 export const DEFAULT_LIST_INACTIVITY_TIMEOUT_MS = 8000;
 export const DEFAULT_LIST_OVERALL_TIMEOUT_MS = 60_000;
 export const DEFAULT_DOWNLOAD_INACTIVITY_TIMEOUT_MS = 8000;
@@ -406,7 +406,7 @@ export function inspectContinuationCatalog(sessions) {
     if (entry.bytes === 0) {
       issues.push(Object.freeze({ code: "empty_session", sessionId: entry.id }));
     }
-    if (entry.version !== 1 && entry.version !== 2) {
+    if (entry.version !== 1 && entry.version !== 2 && entry.version !== 3) {
       issues.push(Object.freeze({
         code: "unsupported_version",
         sessionId: entry.id,

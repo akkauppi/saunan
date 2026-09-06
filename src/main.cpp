@@ -1,6 +1,11 @@
 #include <Arduino.h>
 #include <DallasTemperature.h>
 #include <OneWire.h>
+#include <esp_timer.h>
+#include <esp_mac.h>
+#include <esp_system.h>
+#include <bootloader_random.h>
+#include "radio_link.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -14,7 +19,7 @@
 #include "session_logger.h"
 
 #ifndef SAUNA_FIRMWARE_VERSION
-#define SAUNA_FIRMWARE_VERSION "0.3.0-dev"
+#define SAUNA_FIRMWARE_VERSION "0.4.0-dev"
 #endif
 
 #ifndef SAUNA_SOURCE_COMMIT
@@ -54,6 +59,9 @@ struct DiscoverySnapshot {
 OneWire oneWire(kOneWirePin);
 DallasTemperature sensors(&oneWire);
 sauna::SessionLogger logger;
+sauna_link::RadioLink radio;
+uint64_t sourceId = 0, bootNonce = 0;
+uint32_t skippedScheduleCount = 0;
 sauna::ProbeConfigStore probeConfig;
 sauna::ProbeMapping activeProbeMapping{};
 DiscoverySnapshot latestDiscovery{};
@@ -238,6 +246,9 @@ void collectSample(uint32_t now) {
   reading.capturedAtMs = now;
   reading.chipCentiC = INT16_MIN;
   ++sampleSequence;
+  reading.identity.sequence = sampleSequence;
+  reading.identity.monotonicMs = static_cast<uint64_t>(esp_timer_get_time()) / 1000;
+  reading.identity.skippedScheduleCount = skippedScheduleCount;
   char telemetryLine[kTelemetryLineCapacity]{};
   size_t telemetryLength = 0;
   bool telemetryComplete = appendFormatted(
@@ -298,7 +309,28 @@ void collectSample(uint32_t now) {
   logger.setProbeBusStatus(
       latestDiscovery.count,
       static_cast<uint8_t>(__builtin_popcount(reading.validMask)));
-  logger.addSample(reading);
+  if (logger.addSample(reading)) {
+    sauna_wire::SampleV1 sample{};
+    sample.sourceId = sourceId;
+    sample.bootNonce = bootNonce;
+    sample.bootCounter = logger.bootId();
+    sample.sequence = reading.identity.sequence;
+    sample.senderMonotonicMs = reading.identity.monotonicMs;
+    sample.skippedScheduleCount = reading.identity.skippedScheduleCount;
+    sample.recordingSessionId = logger.sessionId();
+    sample.mappingGeneration = activeProbeMapping.generation;
+    sample.geometryId = sauna_wire::kGeometryColumn8At20Cm;
+    sample.nominalPeriodMs = sauna::kSampleIntervalMs;
+    sample.expectedProbeCount = sauna::kSensorCount;
+    sample.validMask = reading.validMask;
+    sample.chipCentiC = reading.chipCentiC;
+    for (size_t i=0; i<sauna::kSensorCount; ++i) sample.centiC[i] = reading.centiC[i];
+    sample.statusFlags = reading.statusFlags | sauna_wire::kMappingReady;
+    if (logger.bootCounterValid()) sample.statusFlags |= sauna_wire::kBootCounterValid;
+    if (logger.filesystemReady()) sample.statusFlags |= sauna_wire::kStorageReady;
+    if (logger.active()) sample.statusFlags |= sauna_wire::kSessionActive;
+    radio.offer(sample);
+  }
 
   // TELEM is autonomous diagnostics, not part of record persistence.  Queue a
   // complete newline-terminated line in one operation only when HWCDC reports
@@ -589,7 +621,7 @@ bool processConfigCommand(const String& command) {
 }
 
 bool processDeviceCommand(const String& command) {
-  return processSystemCommand(command) || processConfigCommand(command);
+  return radio.command(command, logger.active()) || processSystemCommand(command) || processConfigCommand(command);
 }
 }  // namespace
 
@@ -597,8 +629,16 @@ void setup() {
   Serial.begin(115200);
   enableLoopWDT();
   if (Serial)
-    Serial.printf("sauna logger %s: Wi-Fi disabled protocol=1\n",
+    Serial.printf("sauna logger %s: radio defaults off protocol=1\n",
                   SAUNA_FIRMWARE_VERSION);
+  uint8_t mac[6]{};
+  if (esp_read_mac(mac, ESP_MAC_WIFI_STA) == ESP_OK)
+    for (auto byte : mac) sourceId = (sourceId << 8) | byte;
+  // Temporary hardware entropy source, disabled before any sensor/ADC use.
+  bootloader_random_enable();
+  do { esp_fill_random(&bootNonce, sizeof(bootNonce)); } while (!bootNonce);
+  bootloader_random_disable();
+  logger.setBootIdentity(sourceId, bootNonce);
   printRtcSlowClockDiagnostic();
   configureSensors();
   const bool configStoreAvailable = probeConfig.begin();
@@ -609,6 +649,7 @@ void setup() {
   syncProbeConfigStatus();
   scanProbeBus(false);
   logger.begin();
+  radio.begin(true);
   if (!configStoreAvailable && Serial)
     Serial.println("logger_event=probe_config_unavailable");
   if (Serial)
@@ -638,8 +679,11 @@ void loop() {
   if (!conversionInProgress &&
       static_cast<int32_t>(now - nextConversionAt) >= 0) {
     startConversion(now);
-    do {
+    nextConversionAt += sauna::kSampleIntervalMs;
+    while (static_cast<int32_t>(now - nextConversionAt) >= 0) {
+      ++skippedScheduleCount;
       nextConversionAt += sauna::kSampleIntervalMs;
-    } while (static_cast<int32_t>(now - nextConversionAt) >= 0);
+    }
   }
+  radio.poll(static_cast<uint64_t>(esp_timer_get_time()) / 1000);
 }

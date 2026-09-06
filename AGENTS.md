@@ -16,7 +16,11 @@ ESP32-C3 using PlatformIO with Arduino built as an ESP-IDF component.
   validation, completed-block preservation, explicit interruption metadata, or
   the rule that only a completely erased session partition may be initialized
   automatically; nonblank storage is never formatted automatically.
-- Wi-Fi stays disabled for the sauna logger until explicitly requested.
+- Radio defaults off; only validated, persisted ESP-NOW pairing may enable it.
+  Wi-Fi/UDP is reserved for a later adapter. Keep acquisition independent of radio.
+- New logs use the V3 identity contract in `docs/sample-identity-and-radio.md`;
+  preserve V1/V2 readers and fixtures. Shared packages in `lib/` are canonical
+  here; the receiver consumes a pinned snapshot.
 - RTC slow-clock selection must come from ESP-IDF configuration, not an
   application compiler define. Keep the external 32.768 kHz crystal selected
   and preserve runtime source/fallback diagnostics.

@@ -81,3 +81,9 @@ Run the Python suite, portal suite, and PlatformIO build before release. These
 host tests do not replace physical power-cut testing of LittleFS, acquisition
 timing, or the full session lifecycle. Radio/provisioning, a revised archival
 contract, bounded USB transfers, and field soak testing remain later slices.
+
+## Integration follow-up
+
+The subsequent identity slice writes V3 with the same staging/commit mechanism.
+Its record growth raises start reserve to 256 KiB; partition and commit cadence
+remain unchanged. See [the implemented V3 contract](sample-identity-and-radio.md).

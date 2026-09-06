@@ -72,31 +72,42 @@ def build_run(sessions: Iterable[Any]) -> Run:
             previous_segment_had_points = False
             continue
         predecessor = ordered[segment - 1] if segment else None
+        if predecessor and session.version == 3 and predecessor.version == 3 and session.source_id != predecessor.source_id:
+            raise ValueError("continuation crosses device identities")
         delay = session.continuation_delay_seconds
         proven_continuation = (
             previous_end is not None and previous_segment_had_points
-            and session.version == 2
+            and session.version >= 2
             and session.continuation_kind == "max_duration_sample_anchored"
             and isinstance(delay, int) and 0 < delay <= 255
             and delay >= session.start_hold_seconds
-            and predecessor.version == 2 and predecessor.finalized
+            and predecessor.version >= 2 and predecessor.finalized
             and predecessor.finish_reason == "max_duration"
             and predecessor.footer_record_count == len(predecessor.samples)
             and predecessor.final_relative_seconds == predecessor.samples[-1].relative_seconds
-            and predecessor.boot_id != 0 and predecessor.boot_id == session.boot_id
+            and ((session.version == 3 and predecessor.version == 3
+                  and session.source_id == predecessor.source_id
+                  and session.boot_nonce == predecessor.boot_nonce)
+                 or (session.version == 2 and predecessor.version == 2
+                     and predecessor.boot_id != 0 and predecessor.boot_id == session.boot_id))
             and predecessor.sample_interval_ms == session.sample_interval_ms
         )
         first = session.samples[0].relative_seconds
         offset = 0.0
         if proven_continuation:
             offset = previous_end + delay
+            if session.version == 3:
+                offset = previous_end + (int(session.samples[0].monotonic_ms) - int(predecessor.samples[-1].monotonic_ms)) / 1000 - first
         elif previous_end is not None:
             offset = previous_end - first
             breaks.append(previous_end)
         omitted = 0
         appended = 0
         for sample in session.samples:
-            observed_seconds = sample.relative_seconds + offset
+            local_seconds = sample.relative_seconds
+            if session.version == 3:
+                local_seconds = first + (int(sample.monotonic_ms) - int(session.samples[0].monotonic_ms)) / 1000
+            observed_seconds = local_seconds + offset
             if proven_continuation and observed_seconds <= previous_end:
                 omitted += 1
                 continue

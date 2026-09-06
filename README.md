@@ -340,3 +340,11 @@ SLOG deliberately separates licenses by material:
 The exact path rules and full license texts are in
 [`LICENSES/README.md`](LICENSES/README.md). Vendored dependencies retain their
 upstream licenses.
+
+## Live integration and V3 identity
+
+New recordings preserve acquisition identity in SLOG V3; V1/V2 remain readable.
+Encrypted ESP-NOW is available through explicitly provisioned pairing, with radio
+off by default. See [the identity and radio contract](docs/sample-identity-and-radio.md)
+for offline pairing, compatibility, and hardware release gates. The logger owns
+the shared protocol packages; the private receiver consumes a pinned snapshot.
