@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {spawnSync} from 'node:child_process';
 import {preparePair,validatePairing,validateKit,applyPairing} from '../../portal/js/radio.js';
 const random={getRandomValues(a){a.fill(17);return a;}};
 test('pairing encodes exact shared config and validates both identities',()=>{
@@ -31,4 +32,19 @@ test('matching target requires verified NVS acknowledgment',async()=>{
  await applyPairing(port,kit.logger);assert.equal(port.writes[1],'RADIO '+kit.logger.config_hex);
  await assert.rejects(applyPairing(fake([status,'RADIO_CONFIG ok=0 restart_required=1']),kit.logger));
  await assert.rejects(applyPairing(fake([status,'RADIO_ERROR active_session']),kit.logger));
+});
+
+test('browser pairing documents are accepted by the offline Python reader',()=>{
+ const kit=preparePair('020000000001','020000000002',6,random);
+ const code=`import sys,json,tempfile
+from pathlib import Path
+sys.path.insert(0,'tools')
+import pair_radio
+kit=json.load(sys.stdin)
+with tempfile.TemporaryDirectory() as d:
+ for role in ['logger','receiver']:
+  p=Path(d)/(role+'.json');p.write_text(json.dumps(kit[role]));mac,raw=pair_radio.load_pairing(p);assert len(raw)==60
+`;
+ const result=spawnSync('python3',['-c',code],{input:JSON.stringify(kit),encoding:'utf8'});
+ assert.equal(result.status,0,result.stderr);
 });
