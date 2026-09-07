@@ -37,16 +37,26 @@ def prepare(logger, receiver, channel, output):
     pmk, lmk = secrets.token_bytes(16), secrets.token_bytes(16)
     source = int.from_bytes(logger, "big")
     output.mkdir(mode=0o700)
+    documents = {}
     for role, local, peer in [("logger", logger, receiver), ("receiver", receiver, logger)]:
         blob = config_bytes(source, peer, channel, pmk, lmk)
         document = {"schema": "saunan.pairing.v1", "role": role,
                     "target_mac": local.hex().upper(), "config_hex": blob.hex()}
+        documents[role] = document
         fd = os.open(output / f"{role}.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w") as stream:
             json.dump(document, stream, indent=2)
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
+
+    kit = {"schema": "saunan.pairing-kit.v1", **documents}
+    fd = os.open(output / "pairing-kit.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as stream:
+        json.dump(kit, stream, indent=2)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
 
 
 def load_pairing(path):
@@ -118,7 +128,7 @@ def main(argv=None):
     try:
         if args.action == "prepare":
             prepare(args.logger_mac, args.receiver_mac, args.channel, args.output)
-            print("Created private logger.json and receiver.json pairing files. Keep both for offline recovery.")
+            print("Created private logger.json, receiver.json and pairing-kit.json files. Keep both for offline recovery.")
         else:
             apply(args.port, args.config)
     except (OSError, ValueError, RuntimeError, KeyError) as error:

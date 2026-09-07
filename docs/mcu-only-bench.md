@@ -36,3 +36,6 @@ untrusted boot nonce; receiver epoch confirmation can require two new samples.
 
 Keep the receiver's displayed BENCH label visible during these tests. Passing
 this bench does not qualify real probes, logging, sauna placement, or field range.
+
+`BENCH TIMEOUT` drops the next send callback to test automatic radio recovery.
+Use `RADIO RECOVER` to request radio-only recovery without resetting sample identity.

@@ -685,5 +685,5 @@ void loop() {
       nextConversionAt += sauna::kSampleIntervalMs;
     }
   }
-  radio.poll(static_cast<uint64_t>(esp_timer_get_time()) / 1000);
+  radio.poll();
 }

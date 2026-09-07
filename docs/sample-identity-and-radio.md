@@ -157,11 +157,11 @@ one pending; a newer pending sample replaces the older one. Pending data expires
 after 20 seconds. Callbacks only copy into fixed FreeRTOS queues. A receive queue
 retains one latest datagram; it is not a recording archive.
 
-A missing send callback times out after two seconds and disables radio until an
-explicit reboot. This conservative recovery avoids attributing late callbacks
-to reused buffers; local sampling continues. Ordinary send failures discard that
-sample and try the next acquisition. Automatic recovery from missing callbacks
-is not claimed. Confirm this tradeoff on the physical hardware before deployment.
+A missing send callback times out after two seconds and requests radio-only
+recovery in a separate worker; local sampling continues. The worker tears down
+ESP-NOW and Wi-Fi before clearing callback queues and restoring the saved peer.
+Ordinary send failures discard that sample and try the next acquisition. See
+Radio-only recovery below for retry policy and bench fault injection.
 
 The receiver boots with empty history and renders waiting/live/stale/lost state
 on a timer, even without new packets. It labels last-known readings and separates
@@ -186,3 +186,30 @@ signatures. Physical pairing/encryption, radio placement/range, acquisition jitt
 stack/heap margin, power cuts, and slow USB transfer of a maximum-size V3 file
 remain mandatory hardware checks. No hardware upload or serial access was used
 for this implementation.
+
+## Radio-only recovery and portal preparation
+
+A send callback missing for two seconds requests a radio-only restart. SDK
+teardown/startup runs in a persistent FreeRTOS worker, outside the acquisition
+loop; it unregisters callbacks, deinitializes ESP-NOW, stops Wi-Fi, clears callback
+queues, and restores the same saved channel and encrypted peer. Queues remain
+allocated throughout. Retries back off from one second to sixty seconds. Invalid
+or absent pairing stays off. No Wi-Fi/UDP fallback or NVS write occurs on recovery.
+
+`RADIO RECOVER` requests the same recovery while recording is allowed. `RADIO
+STATUS` adds role, recovering, recovery_attempts and recoveries. Normal delivery
+failure does not restart the radio or stop sampling. Reconfiguration and unit
+reboot remain blocked during recording. Radio polling obtains a fresh clock
+internally so a caller cannot prematurely expire a just-offered sample.
+
+`portal/radio.html` prepares or imports a private pairing kit, reads board status,
+checks target MAC and role before writing, and exposes radio recovery. Save the
+kit before applying, configure both boards from the same kit, reboot and verify
+live receiver readings. Current firmware exposing the role field is required.
+The Python prepare command also writes `pairing-kit.json` for browser import;
+individual files remain usable by its existing apply command. No keys are
+published, cached by the page, or included in diagnostics.
+
+The MCU-only bench adds `BENCH TIMEOUT` to drop one send callback deliberately.
+This hook is compiled only with `SAUNA_RADIO_BENCH_TEST` in the separate bench
+project. It is absent from production firmware.

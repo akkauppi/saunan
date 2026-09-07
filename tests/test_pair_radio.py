@@ -11,6 +11,11 @@ class PairingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output=Path(directory)/"pair"
             pair_radio.prepare("020000000001","020000000002",6,output)
+            kit=json.loads((output/"pairing-kit.json").read_text())
+            self.assertEqual(kit["schema"],"saunan.pairing-kit.v1")
+            self.assertEqual(kit["logger"],json.loads((output/"logger.json").read_text()))
+            self.assertEqual(kit["receiver"],json.loads((output/"receiver.json").read_text()))
+            self.assertEqual((output/"pairing-kit.json").stat().st_mode & 0o777,0o600)
             lm,logger=pair_radio.load_pairing(output/"logger.json")
             rm,receiver=pair_radio.load_pairing(output/"receiver.json")
             self.assertEqual(logger[24:56],receiver[24:56])

@@ -12,7 +12,8 @@ bool paused=false,missing=false,overflow=false;
 String line;
 uint64_t nowMs() { return static_cast<uint64_t>(esp_timer_get_time())/1000; }
 void command() {
-  if(line=="BENCH PAUSE") paused=true;
+  if(line=="BENCH TIMEOUT") radio.dropNextSendCallbackForTest();
+  else if(line=="BENCH PAUSE") paused=true;
   else if(line=="BENCH RUN") paused=false;
   else if(line=="BENCH MISSING") missing=true;
   else if(line=="BENCH VALID") missing=false;
@@ -62,6 +63,6 @@ void loop() {
       sample.centiC[i]=missing?INT16_MIN:static_cast<int16_t>(4000+(sequence%40)*50-i*200);
     if(!paused) radio.offer(sample);
   }
-  radio.poll(now);
+  radio.poll();
   delay(1);
 }

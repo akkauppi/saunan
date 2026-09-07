@@ -14,7 +14,7 @@ RadioLink* instance=nullptr;
 uint64_t nowMs() { return static_cast<uint64_t>(esp_timer_get_time())/1000; }
 #if ESP_IDF_VERSION_MAJOR >= 5
 void receiveCallback(const esp_now_recv_info_t* info,const uint8_t* bytes,int size) {
-  if(instance && info) instance->onReceive(info->src_addr,bytes,size);
+  if(instance && info) instance->onReceive(info->src_addr,bytes,size,info->rx_ctrl ? info->rx_ctrl->rssi : INT16_MIN);
 }
 #else
 void receiveCallback(const uint8_t* peer,const uint8_t* bytes,int size) {
@@ -51,53 +51,114 @@ void RadioLink::begin(bool sender) {
   sendQueue_=xQueueCreate(1,sizeof(bool));
   if(!receiveQueue_ || !sendQueue_) { fault_=true; return; }
   instance=this;
+  if(xTaskCreate(recoveryWorker,"sauna_radio",4096,this,1,&recoveryTask_)!=pdPASS) {
+    fault_=true; return;
+  }
+  if(!startTransport()) requestRecovery();
+}
+bool RadioLink::startTransport() {
   WiFi.persistent(false);
   if(!WiFi.mode(WIFI_STA) || esp_wifi_set_ps(WIFI_PS_NONE)!=ESP_OK ||
       esp_wifi_set_channel(config_.channel,WIFI_SECOND_CHAN_NONE)!=ESP_OK ||
       esp_now_init()!=ESP_OK) {
-    WiFi.mode(WIFI_OFF); fault_=true; return;
+    fault_=true; return false;
   }
-  enabled_=true;
+  transportInitialized_=true;
   esp_now_peer_info_t peer{};
   memcpy(peer.peer_addr,config_.peer.data(),6);
   memcpy(peer.lmk,config_.lmk.data(),16);
   peer.channel=config_.channel; peer.ifidx=WIFI_IF_STA; peer.encrypt=true;
   if(esp_now_set_pmk(config_.pmk.data())!=ESP_OK || esp_now_add_peer(&peer)!=ESP_OK ||
       esp_now_register_recv_cb(receiveCallback)!=ESP_OK || esp_now_register_send_cb(sendCallback)!=ESP_OK) {
-    fault_=true; stop();
+    fault_=true; return false;
   }
+  callbacksEnabled_=true;
+  fault_=false; enabled_=true;
+  return true;
+}
+bool RadioLink::stopTransport() {
+  enabled_=false; callbacksEnabled_=false;
+  if(transportInitialized_) {
+    esp_now_unregister_recv_cb(); esp_now_unregister_send_cb();
+    if(esp_now_deinit()!=ESP_OK) return false;
+    transportInitialized_=false;
+  }
+  // Stop the Wi-Fi task/driver before reusing callback queues and send state.
+  // Queues remain allocated for the lifetime of this link, including shutdown.
+  if(!WiFi.mode(WIFI_OFF)) return false;
+  if(receiveQueue_) xQueueReset(receiveQueue_);
+  if(sendQueue_) xQueueReset(sendQueue_);
+  return true;
 }
 void RadioLink::stop() {
-  if(enabled_) {
-    esp_now_unregister_recv_cb(); esp_now_unregister_send_cb();
-    esp_now_deinit(); WiFi.mode(WIFI_OFF);
-  }
-  enabled_=false; busy_=false; pending_.clear();
+  stopTransport();
+  busy_=false; pending_.clear();
 }
-void RadioLink::onReceive(const uint8_t* peer,const uint8_t* bytes,int size) {
-  if(!receiveQueue_ || sender_ || !peer || !bytes || size<20 || size>250 ||
+bool RadioLink::requestRecovery() {
+  if(!recoveryTask_ || restartRequired_ || config_.mode!=RadioMode::EspNow) return false;
+  if(recovering_) return true;
+  recovering_=true;
+  retryAt_=nowMs(); retryDelayMs_=1000;
+  return true;
+}
+void RadioLink::recoveryWorker(void* context) {
+  auto* self=static_cast<RadioLink*>(context);
+  for(;;) {
+    ulTaskNotifyTake(pdTRUE,portMAX_DELAY);
+    ++self->recoveryAttempts_;
+    const bool ok=self->stopTransport() && self->startTransport();
+    if(ok) ++self->recoveries_;
+    else self->fault_=true;
+    // Publish completion only after SDK teardown/startup and all queue work.
+    self->workerBusy_=false;
+  }
+}
+void RadioLink::onReceive(const uint8_t* peer,const uint8_t* bytes,int size,int16_t rssi) {
+  if(!callbacksEnabled_ || !receiveQueue_ || sender_ || !peer || !bytes || size<20 || size>250 ||
       memcmp(peer,config_.peer.data(),6)) return;
   ReceivedDatagram packet{};
+  packet.rssiDbm=rssi;
   packet.size=static_cast<uint16_t>(size); packet.receivedAtMs=nowMs();
   memcpy(packet.peer,peer,6); memcpy(packet.bytes,bytes,size);
   xQueueOverwrite(receiveQueue_,&packet);
 }
 void RadioLink::onSend(bool success) {
-  if(sendQueue_) xQueueOverwrite(sendQueue_,&success);
+#ifdef SAUNA_RADIO_BENCH_TEST
+  if(dropNextCallback_.exchange(false)) return;
+#endif
+  if(callbacksEnabled_ && sendQueue_) xQueueOverwrite(sendQueue_,&success);
 }
 void RadioLink::offer(const sauna_wire::SampleV1& sample) {
-  if(enabled_ && sender_ && sample.sourceId==localSourceId_ && pending_.offer(sample,nowMs())) ++offered_;
+  if(enabled_ && !recovering_ && sender_ && sample.sourceId==localSourceId_ && pending_.offer(sample,nowMs())) ++offered_;
 }
-void RadioLink::poll(uint64_t now) {
+void RadioLink::poll() {
+  const uint64_t now=nowMs();
+  if(recovering_) {
+    if(workerBusy_) return;
+    if(enabled_ && !fault_ && retryAt_==UINT64_MAX) {
+      recovering_=false; retryDelayMs_=1000;
+    } else {
+      if(retryAt_==UINT64_MAX) {
+        retryAt_=now+retryDelayMs_;
+        retryDelayMs_=retryDelayMs_<30000 ? retryDelayMs_*2 : 60000;
+      }
+      if(now>=retryAt_) {
+        busy_=false; pending_.clear();
+        retryAt_=UINT64_MAX; workerBusy_=true;
+        xTaskNotifyGive(recoveryTask_);
+      }
+      return;
+    }
+  }
   if(!enabled_ || !sender_) return;
   bool success=false;
   if(busy_ && xQueueReceive(sendQueue_,&success,0)==pdTRUE) {
     busy_=false; if(success) ++sent_; else ++failed_;
   }
   if(busy_ && now-sentAt_>=2000) {
-    // Unknown callback ownership: fail closed rather than reuse an in-flight
-    // buffer. Explicit reboot recovers radio; local acquisition keeps running.
-    ++timeouts_; fault_=true; stop(); return;
+    // Stop offering samples until the worker has rebuilt the radio stack.
+    // Acquisition, identity and log state are untouched.
+    ++timeouts_; fault_=true; requestRecovery(); return;
   }
   if(!busy_ && pending_.take(now,inFlight_)) {
     xQueueReset(sendQueue_);
@@ -108,7 +169,7 @@ void RadioLink::poll(uint64_t now) {
   }
 }
 bool RadioLink::receive(ReceivedDatagram& packet) {
-  return enabled_ && !sender_ && xQueueReceive(receiveQueue_,&packet,0)==pdTRUE;
+  return enabled_ && !recovering_ && !sender_ && xQueueReceive(receiveQueue_,&packet,0)==pdTRUE;
 }
 bool RadioLink::save(const RadioConfig& config) {
   uint8_t raw[kRadioConfigBytes]{},check[kRadioConfigBytes]{};
@@ -126,11 +187,14 @@ bool RadioLink::save(const RadioConfig& config) {
 bool RadioLink::command(const String& line,bool recordingActive) {
   if(!line.startsWith("RADIO")) return false;
   if(line=="RADIO STATUS") {
-    Serial.printf("RADIO_STATUS protocol=1 mac=%02X%02X%02X%02X%02X%02X source=%016llX mode=%s active=%u fault=%u restart_required=%u channel=%u offered=%u sent=%u failed=%u replaced=%u expired=%u timeouts=%u\n",
+    Serial.printf("RADIO_STATUS protocol=1 mac=%02X%02X%02X%02X%02X%02X source=%016llX mode=%s active=%u fault=%u restart_required=%u channel=%u offered=%u sent=%u failed=%u replaced=%u expired=%u timeouts=%u recovering=%u recovery_attempts=%u recoveries=%u role=%s\n",
         localMac_[0],localMac_[1],localMac_[2],localMac_[3],localMac_[4],localMac_[5],
         static_cast<unsigned long long>(localSourceId_),config_.mode==RadioMode::EspNow?"espnow":"off",
-        enabled_,fault_,restartRequired_,config_.channel,offered_,sent_,failed_,pending_.replaced,pending_.expired,timeouts_);
-  } else if(recordingActive) Serial.println("RADIO_ERROR active_session");
+        enabled_.load(),fault_.load(),restartRequired_,config_.channel,offered_,sent_,failed_,pending_.replaced,pending_.expired,timeouts_,recovering_.load(),recoveryAttempts_.load(),recoveries_.load(),sender_?"logger":"receiver");
+  } else if(line=="RADIO RECOVER") {
+    Serial.printf("RADIO_RECOVER ok=%u\n",requestRecovery());
+  } else if(recovering_) Serial.println("RADIO_ERROR recovery_in_progress");
+  else if(recordingActive) Serial.println("RADIO_ERROR active_session");
   else if(line=="RADIO REBOOT") { Serial.println("RADIO_REBOOT ok=1"); delay(20); ESP.restart(); }
   else if(restartRequired_) Serial.println("RADIO_ERROR restart_required");
   else if(line=="RADIO OFF") {
